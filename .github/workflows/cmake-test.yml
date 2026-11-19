@@ -138,7 +138,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: iris-cpp/cpp-warning-notifier@v0.7
+      - uses: iris-cpp/cpp-warning-notifier@v0.8.1
         with:
           RUN_ID: ${{ github.run_id }}
           JOB_ID: ${{ job.check_run_id }}
