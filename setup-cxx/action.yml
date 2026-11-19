@@ -1,0 +1,100 @@
+name: setup-cxx
+description: >
+  Install a C++ compiler (GCC or Clang on Ubuntu, MSVC on Windows) and Ninja,
+  and report the compiler executable to pass as CMAKE_CXX_COMPILER.
+
+inputs:
+  compiler:
+    description: One of gcc, clang, msvc.
+    required: true
+  version:
+    description: Major version for gcc and clang (e.g. 14, 21). Ignored for msvc.
+    default: ""
+  toolset-prefix:
+    description: >
+      MSVC toolset version prefix passed to yaito3014/setup-msvc (e.g. '14.44',
+      '14.5'). Required for msvc.
+    default: ""
+  arch:
+    description: MSVC target architecture passed to vcvarsall.
+    default: x64
+  ninja:
+    description: Also install Ninja.
+    default: "true"
+
+outputs:
+  cxx:
+    description: Compiler executable, e.g. g++-14, clang++-21, cl.
+    value: ${{ steps.cxx.outputs.cxx }}
+  msvc-toolset:
+    description: Full version of the selected MSVC toolset (msvc only), e.g. 14.44.35207.
+    value: ${{ steps.msvc.outputs.toolset }}
+
+runs:
+  using: composite
+  steps:
+    - id: cxx
+      shell: bash
+      env:
+        COMPILER: ${{ inputs.compiler }}
+        VERSION: ${{ inputs.version }}
+        TOOLSET_PREFIX: ${{ inputs.toolset-prefix }}
+      run: |
+        case "$COMPILER:$RUNNER_OS" in
+          gcc:Linux) cxx="g++-$VERSION" ;;
+          clang:Linux) cxx="clang++-$VERSION" ;;
+          msvc:Windows) cxx=cl ;;
+          *)
+            echo "::error::compiler '$COMPILER' is not supported on $RUNNER_OS"
+            exit 1
+            ;;
+        esac
+        if [ "$COMPILER" = msvc ]; then
+          if [ -z "$TOOLSET_PREFIX" ]; then
+            echo "::error::toolset-prefix is required for msvc"
+            exit 1
+          fi
+        elif ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+$'; then
+          echo "::error::version must be a major version number, got '$VERSION'"
+          exit 1
+        fi
+        echo "cxx=$cxx" >> "$GITHUB_OUTPUT"
+
+    # man-db rebuilds its index on every apt install, which takes minutes.
+    - if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "set man-db/auto-update false" | sudo debconf-communicate
+        sudo dpkg-reconfigure man-db
+        sudo apt-get update
+
+    - if: inputs.ninja == 'true' && runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get install -y ninja-build
+
+    - if: inputs.ninja == 'true' && runner.os == 'Windows'
+      shell: pwsh
+      run: choco install ninja -y
+
+    - if: inputs.compiler == 'gcc'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: sudo apt-get install -y "g++-$VERSION"
+
+    - if: inputs.compiler == 'clang'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        wget -q https://apt.llvm.org/llvm.sh -O "$RUNNER_TEMP/llvm.sh"
+        sudo bash "$RUNNER_TEMP/llvm.sh" "$VERSION" all
+
+    # Runner images replace toolsets on update (e.g. 14.51 by 14.52), so use
+    # the newest installed one matching the prefix instead of a fixed version.
+    - id: msvc
+      if: inputs.compiler == 'msvc'
+      uses: yaito3014/setup-msvc@v0.1.1
+      with:
+        toolset-prefix: ${{ inputs.toolset-prefix }}
+        arch: ${{ inputs.arch }}
