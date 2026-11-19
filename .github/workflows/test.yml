@@ -1,0 +1,71 @@
+name: Test
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # Tests setup-cxx at this commit; cmake-test.yml below uses the released
+  # setup-cxx tag it pins, not this commit's.
+  setup-cxx:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, compiler: gcc, version: 14 }
+          - { os: ubuntu-24.04, compiler: clang, version: 21 }
+          - { os: ubuntu-24.04, compiler: clang, version: 21, cxxflags: -stdlib=libc++ }
+          - { os: windows-2025-vs2026, compiler: msvc, toolset-prefix: "14.44" }
+          - { os: windows-2025-vs2026, compiler: msvc, toolset-prefix: "14.5" }
+    name: setup-cxx (${{ matrix.compiler }} ${{ matrix.version || matrix.toolset-prefix }}${{ matrix.cxxflags && format(' {0}', matrix.cxxflags) || '' }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: setup
+        uses: ./setup-cxx
+        with:
+          compiler: ${{ matrix.compiler }}
+          version: ${{ matrix.version }}
+          toolset-prefix: ${{ matrix.toolset-prefix }}
+      - name: Selected MSVC toolset is active
+        if: matrix.compiler == 'msvc'
+        shell: pwsh
+        env:
+          EXPECTED: ${{ steps.setup.outputs.msvc-toolset }}
+        run: |
+          $actual = $env:VCToolsVersion.TrimEnd('\')
+          Write-Host "expected=$env:EXPECTED actual=$actual"
+          if ($actual -ne $env:EXPECTED) { throw "VCToolsVersion mismatch" }
+      - name: Configure
+        run: >
+          cmake -G Ninja
+          -DCMAKE_CXX_STANDARD=20
+          -DCMAKE_CXX_COMPILER=${{ steps.setup.outputs.cxx }}
+          "-DCMAKE_CXX_FLAGS_INIT=${{ matrix.cxxflags }}"
+          -B build test/fixture
+      - name: Build
+        run: cmake --build build
+      - name: Run test
+        run: ctest --test-dir build --output-on-failure
+
+  cmake-test:
+    # id-token is checked against the nested notifier job even when it is skipped
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/cmake-test.yml
+    with:
+      cxx-versions: "[11, 23, 26]"
+      source-dir: test/fixture
+      notify: false
