@@ -1,0 +1,148 @@
+name: CMake test
+
+# Builds and tests a CMake project across GCC, Clang (libstdc++ and libc++)
+# and MSVC, then posts the warning table with cpp-warning-notifier.
+#
+# The caller must grant `contents: read` and `id-token: write`; GitHub checks
+# the notifier job's permissions even when `notify` is false.
+
+on:
+  workflow_call:
+    inputs:
+      cxx-versions:
+        description: JSON array of C++ versions, e.g. '[17, 20, 23, 26]'.
+        type: string
+        required: true
+      cmake-args:
+        description: >
+          Extra configure arguments, space-separated and unquoted (the same
+          text is passed to bash and pwsh), e.g. '-DFOO_CI=ON'.
+        type: string
+        default: ""
+      source-dir:
+        description: Directory containing the top-level CMakeLists.txt.
+        type: string
+        default: "."
+      notify:
+        description: Run cpp-warning-notifier after the build jobs.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - name: ubuntu
+            version: 24.04
+          - name: windows
+            version: 2025-vs2026
+        build-type:
+          - Debug
+          - Release
+        compiler:
+          - id: gcc
+            name: GCC
+            version: 14
+          - id: clang
+            name: Clang
+            version: 21
+          # libc++ and libstdc++ differ in what they accept (e.g. in constant
+          # evaluation), so Clang is tested with both
+          - id: clang
+            name: Clang
+            version: 21
+            stdlib: libc++
+          - id: msvc
+            name: MSVC
+            version: 2022
+            toolset-prefix: "14.44"
+          - id: msvc
+            name: MSVC
+            version: 2026
+            toolset-prefix: "14.5"
+        cxx-version: ${{ fromJSON(inputs.cxx-versions) }}
+        exclude:
+          - os:
+              name: windows
+            compiler:
+              id: gcc
+          - os:
+              name: windows
+            compiler:
+              id: clang
+          - os:
+              name: ubuntu
+            compiler:
+              id: msvc
+          # MSVC has no C++11 mode, and CMake has no C++26 flag for MSVC (the
+          # C++23 jobs already use -std:c++latest).
+          - compiler:
+              id: msvc
+            cxx-version: 11
+          - compiler:
+              id: msvc
+            cxx-version: 26
+    # cpp-warning-notifier parses this name; keep it in sync with JOB_REGEX.
+    name: C++${{ matrix.cxx-version }} ${{ matrix.build-type }} (${{ matrix.compiler.name }}${{ matrix.compiler.stdlib && format(' {0}', matrix.compiler.stdlib) || '' }} ${{ matrix.compiler.version }} on ${{ matrix.os.name }})
+    runs-on: ${{ matrix.os.name }}-${{ matrix.os.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: setup
+        uses: yaito3014/cpp-ci/setup-cxx@v0.1.0
+        with:
+          compiler: ${{ matrix.compiler.id }}
+          version: ${{ matrix.compiler.version }}
+          toolset-prefix: ${{ matrix.compiler.toolset-prefix }}
+      - name: Restore deps from cache
+        id: cache-restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ inputs.source-dir }}/build/_deps
+          key: cpp-ci-${{ matrix.os.name }}-${{ matrix.os.version }}-${{ matrix.compiler.id }}-${{ matrix.compiler.version }}${{ matrix.compiler.stdlib && format('-{0}', matrix.compiler.stdlib) || '' }}${{ steps.setup.outputs.msvc-toolset && format('-{0}', steps.setup.outputs.msvc-toolset) || '' }}-cxx${{ matrix.cxx-version }}-${{ matrix.build-type }}
+      # CMAKE_CXX_FLAGS_INIT, not CMAKE_CXX_FLAGS: the platform defaults
+      # (MSVC's /EHsc among them) are appended to it rather than replaced
+      - name: Configure
+        working-directory: ${{ inputs.source-dir }}
+        run: >
+          cmake -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
+          -DCMAKE_CXX_STANDARD=${{ matrix.cxx-version }}
+          -DCMAKE_CXX_COMPILER=${{ steps.setup.outputs.cxx }}
+          "-DCMAKE_CXX_FLAGS_INIT=${{ matrix.compiler.stdlib && format('-stdlib={0}', matrix.compiler.stdlib) || '' }}"
+          ${{ inputs.cmake-args }}
+          -B build .
+      - name: Build tests
+        working-directory: ${{ inputs.source-dir }}
+        run: |
+          echo "CPPWARNINGNOTIFIER_LOG_MARKER"
+          cmake --build build
+      - name: Save deps to cache
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ inputs.source-dir }}/build/_deps
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
+      - name: Run test
+        working-directory: ${{ inputs.source-dir }}
+        run: ctest --test-dir build -C ${{ matrix.build-type }} --output-on-failure
+
+  run-notifier:
+    if: inputs.notify
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: iris-cpp/cpp-warning-notifier@v0.7
+        with:
+          RUN_ID: ${{ github.run_id }}
+          JOB_ID: ${{ job.check_run_id }}
+          JOB_REGEX: C\+\+(?<cppVersion>\d+) (?<config>.+) \((?<vendorName>.+) (?<vendorVersion>.+) on (?<osName>.+)\)
+          STEP_REGEX: Build.+
+          ROW_HEADERS: '["osName", "vendorName", "vendorVersion", "config"]'
+          COLUMN_HEADER: cppVersion
